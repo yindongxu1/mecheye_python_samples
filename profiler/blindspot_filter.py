@@ -1,4 +1,4 @@
-﻿from mecheye.shared import *
+from mecheye.shared import *
 from mecheye.profiler import *
 from mecheye.profiler_utils import *
 import cv2
@@ -22,7 +22,7 @@ class CustomAcquisitionCallback(AcquisitionCallbackBase):
         mutex.release()
 
 
-class TriggerWithExternalDeviceAndFixedRate(object):
+class TriggerWithSoftwareAndFixedRate(object):
     def __init__(self):
         self.profiler = Profiler()
 
@@ -35,7 +35,8 @@ class TriggerWithExternalDeviceAndFixedRate(object):
         show_error(self.user_set.set_int_value(
             ExposureTime.name, exposure_time))
 
-    def set_hdr_exposure(self, exposure_time: int, proportion1: float, proportion2: float, first_threshold: float, second_threshold: float):
+    def set_hdr_exposure(self, exposure_time: int, proportion1: float, proportion2: float, first_threshold: float,
+                         second_threshold: float):
         # Set the "Exposure Mode" parameter to "HDR"
         show_error(self.user_set.set_enum_value(
             ExposureMode.name, ExposureMode.Value_HDR))
@@ -90,9 +91,9 @@ class TriggerWithExternalDeviceAndFixedRate(object):
         # # second exposure phase is completed.
         # self.set_hdr_exposure(100, 40, 80, 10, 60)
 
-        # Set the "Data Acquisition Trigger Source" parameter to "External"
+        # Set the "Data Acquisition Trigger Source" parameter to "Software"
         show_error(self.user_set.set_enum_value(
-            DataAcquisitionTriggerSource.name, DataAcquisitionTriggerSource.Value_External))
+            DataAcquisitionTriggerSource.name, DataAcquisitionTriggerSource.Value_Software))
 
         # Set the "Line Scan Trigger Source" parameter to "Fixed rate"
         show_error(self.user_set.set_enum_value(
@@ -250,6 +251,87 @@ class TriggerWithExternalDeviceAndFixedRate(object):
         cv2.imwrite(intensity_file_name,
                     self.profile_batch.get_intensity_image().data())
 
+    def save_data_to_ply(self, file_name, is_organized=True):
+        with open(file_name, 'w') as file:
+            depth = self.profile_batch.get_depth_map().data()
+            if not is_organized:
+                depth = depth[~np.isnan(depth)]
+            y, x = np.indices(depth.shape, dtype=np.uint16)
+
+            file.write(f"""ply
+format ascii 1.0
+comment File generated
+comment x y z data unit in mm
+element vertex {depth.size}
+property float x
+property float y
+property float z
+end_header
+"""
+                       )
+
+            def depth_to_point(x, y, depth):
+                if not np.isnan(depth):
+                    file.write("{} {} {}\n".format(x * self.x_unit *
+                                                   pitch, y * self.y_unit * pitch, depth))
+                else:
+                    file.write("nan nan nan\n")
+
+            np.vectorize(depth_to_point)(x, np.repeat(self.encoder_vals, self.data_points).reshape(
+                depth.shape) if self.use_encoder_values else y, depth)
+
+    def save_data_to_csv(self, file_name, is_organized=True):
+        with open(file_name, 'w') as file:
+            file.write("X,Y,Z\n")
+            depth = self.profile_batch.get_depth_map().data()
+            y, x = np.indices(depth.shape, np.uint16)
+
+            def depth_to_point(x, y, depth):
+                if not np.isnan(depth):
+                    file.write("{},{},{}\n".format(x * self.x_unit *
+                                                   pitch, y * self.y_unit * pitch, depth))
+                elif is_organized:
+                    file.write("nan,nan,nan\n")
+
+            np.vectorize(depth_to_point)(x, np.repeat(self.encoder_vals, self.data_points).reshape(
+                depth.shape) if self.use_encoder_values else y, depth)
+
+    def get_trigger_interval_distance(self):
+        while True:
+            print(
+                "Please enter encoder trigger interval distance (unit: um, min: 1, max: 65535): ")
+            trigger_interval_distance = input()
+            if trigger_interval_distance.isdigit() and 1 <= int(trigger_interval_distance) <= 65535:
+                self.y_unit = int(trigger_interval_distance)
+                break
+            print("Input invalid!")
+
+    def save_point_cloud(self, save_ply=True, save_csv=True, is_organized=True):
+        if self.profile_batch.is_empty():
+            return
+
+        error, self.x_unit = self.user_set.get_float_value(
+            XAxisResolution.name)
+        show_error(error)
+
+        error, self.y_unit = self.user_set.get_float_value(YResolution.name)
+        show_error(error)
+        # # Uncomment the following line for custom Y Unit
+        # self.get_trigger_interval_distance()
+
+        error, line_scan_trigger_source = self.user_set.get_enum_value(
+            LineScanTriggerSource.name)
+        self.use_encoder_values = line_scan_trigger_source == LineScanTriggerSource.Value_Encoder
+
+        encoder_vals = self.profile_batch.get_encoder_array().data().squeeze().astype(np.int64)
+        self.encoder_vals = (encoder_vals - encoder_vals[0]).astype(np.uint16)
+
+        print("Save the point cloud.")
+        if (save_csv):
+            self.save_data_to_csv("PointCloud.csv", is_organized)
+        if (save_ply):
+            self.save_data_to_ply("PointCloud.ply", is_organized)
+
     def main(self):
         if not find_and_connect(self.profiler):
             return -1
@@ -259,11 +341,11 @@ class TriggerWithExternalDeviceAndFixedRate(object):
 
         self.set_parameters()
 
-        self.profile_batch = ProfileBatch(self.data_width)
+        # Set the "EnableBlindSpotFiltering" parameter to "True"
+        show_error(self.user_set.set_bool_value(
+            EnableBlindSpotFiltering.name, True))
 
-        # # Acquire profile data without using callback
-        # if not self.acquire_profile_data():
-        # return -1
+        self.profile_batch = ProfileBatch(self.data_width)
 
         # Acquire profile data using callback
         if not self.acquire_profile_data_using_callback():
@@ -275,6 +357,7 @@ class TriggerWithExternalDeviceAndFixedRate(object):
 
         print("Save the depth map and intensity image")
         self.save_depth_and_intensity("depth.tiff", "intensity.png")
+        self.save_point_cloud(save_ply=True, save_csv=True, is_organized=True)
 
         # # Uncomment the following line to save a virtual device file using the ProfileBatch acquired.
         # self.profiler.save_virtual_device_file(self.profile_batch, "test.mraw")
@@ -285,5 +368,5 @@ class TriggerWithExternalDeviceAndFixedRate(object):
 
 
 if __name__ == '__main__':
-    a = TriggerWithExternalDeviceAndFixedRate()
+    a = TriggerWithSoftwareAndFixedRate()
     a.main()

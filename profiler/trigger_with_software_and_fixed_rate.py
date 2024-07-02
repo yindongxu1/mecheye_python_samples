@@ -311,19 +311,33 @@ end_header
 
         error, self.x_unit = self.user_set.get_float_value(
             XAxisResolution.name)
-        show_error(error)
+        if not error.is_ok():
+            show_error(error)
+            return
 
         error, self.y_unit = self.user_set.get_float_value(YResolution.name)
-        show_error(error)
+        if not error.is_ok():
+            show_error(error)
+            return
         # # Uncomment the following line for custom Y Unit
         # self.get_trigger_interval_distance()
 
         error, line_scan_trigger_source = self.user_set.get_enum_value(
             LineScanTriggerSource.name)
+        if not error.is_ok():
+            show_error(error)
+            return
         self.use_encoder_values = line_scan_trigger_source == LineScanTriggerSource.Value_Encoder
 
+        error, trigger_interval = self.user_set.get_int_value(
+            EncoderTriggerInterval.name)
+        if not error.is_ok():
+            show_error(error)
+            return
+
         encoder_vals = self.profile_batch.get_encoder_array().data().squeeze().astype(np.int64)
-        self.encoder_vals = (encoder_vals - encoder_vals[0]).astype(np.uint16)
+        self.encoder_vals = (
+            encoder_vals - encoder_vals[0]).astype(np.uint16) / trigger_interval
 
         print("Save the point cloud.")
         if (save_csv):
@@ -349,6 +363,10 @@ end_header
         # # Acquire profile data using callback
         # if not self.acquire_profile_data_using_callback():
             # return -1
+
+        if self.profile_batch.check_flag(ProfileBatch.BatchFlag_Incomplete):
+            print("Part of the batch's data is lost, the number of valid profiles is:",
+                  self.profile_batch.valid_height())
 
         print("Save the depth map and intensity image")
         self.save_depth_and_intensity("depth.tiff", "intensity.png")
